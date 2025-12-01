@@ -364,13 +364,22 @@ usage() {
     echo "Usage: $0 [--paranoid] [--parallelism N] <directory_to_scan>"
     echo
     echo "OPTIONS:"
-    echo "  --paranoid         Enable additional security checks (typosquatting, network patterns)"
-    echo "                     These are general security features, not specific to Shai-Hulud"
+    echo "  --paranoid         Enable pattern-based heuristic detection (may have false positives)"
+    echo "                     Includes: destructive patterns, crypto theft, XMLHttpRequest hijacking,"
+    echo "                     postinstall hooks, trufflehog activity, discussion workflows,"
+    echo "                     typosquatting, network exfiltration patterns"
     echo "  --parallelism N    Set the number of threads to use for parallelized steps (current: ${PARALLELISM})"
     echo ""
+    echo "DEFAULT MODE (Zero False Positives):"
+    echo "  - Exact compromised package:version matching (1700+ known packages)"
+    echo "  - SHA256 hash matching against known malicious files"
+    echo "  - Specific IOC filenames: setup_bun.js, bun_environment.js, actionsSecrets.json"
+    echo "  - Exact string matching: SHA1HULUD, shai-hulud in repos/branches"
+    echo "  - Malicious preinstall patterns: \"node setup_bun.js\""
+    echo ""
     echo "EXAMPLES:"
-    echo "  $0 /path/to/your/project                    # Core Shai-Hulud detection only"
-    echo "  $0 --paranoid /path/to/your/project         # Core + advanced security checks"
+    echo "  $0 /path/to/your/project                    # Deterministic detection (zero FP)"
+    echo "  $0 --paranoid /path/to/your/project         # + pattern-based heuristics (may have FP)"
     exit 1
 }
 
@@ -2674,61 +2683,73 @@ main() {
     echo
 
     # Collect all files in a single pass for performance optimization
-    print_status "$ORANGE" "[Stage 1/6] Collecting file inventory for analysis"
+    print_status "$ORANGE" "[Stage 1/4] Collecting file inventory for analysis"
     collect_all_files "$scan_dir"
 
     # Show summary of collected files
     local total_files=$(wc -l < "$TEMP_DIR/all_files_raw.txt" 2>/dev/null || echo "0")
     print_stage_complete "File collection ($total_files files)"
 
-    # Run core Shai-Hulud detection checks (sequential for reliability)
-    print_status "$ORANGE" "[Stage 2/6] Core detection (workflows, hashes, packages, hooks)"
-    check_workflow_files "$scan_dir"
+    # ===========================================================================
+    # DETERMINISTIC DETECTION (Zero False Positives)
+    # These checks use exact matching: hashes, package versions, specific filenames
+    # ===========================================================================
+    print_status "$ORANGE" "[Stage 2/4] Deterministic detection (zero false positives)"
+    print_status "$BLUE" "   Running exact-match checks..."
+
+    # Hash-based detection (zero FP)
     check_file_hashes "$scan_dir"
+
+    # Package:version matching (zero FP)
     check_packages "$scan_dir"
-    check_postinstall_hooks "$scan_dir"
-    print_stage_complete "Core detection"
-
-    # Content analysis
-    print_status "$ORANGE" "[Stage 3/6] Content analysis (patterns, crypto, trufflehog, git)"
-    check_content "$scan_dir"
-    check_crypto_theft_patterns "$scan_dir"
-    check_trufflehog_activity "$scan_dir"
-    check_git_branches "$scan_dir"
-    print_stage_complete "Content analysis"
-
-    # Repository analysis
-    print_status "$ORANGE" "[Stage 4/6] Repository analysis (repos, integrity, bun, workflows)"
-    check_shai_hulud_repos "$scan_dir"
     check_package_integrity "$scan_dir"
-    check_bun_attack_files "$scan_dir"
-    check_new_workflow_patterns "$scan_dir"
-    print_stage_complete "Repository analysis"
 
-    # Advanced pattern detection
-    print_status "$ORANGE" "[Stage 5/6] Advanced detection (discussions, runners, destructive)"
-    check_discussion_workflows "$scan_dir"
-    check_github_runners "$scan_dir"
-    check_destructive_patterns "$scan_dir"
-    check_preinstall_bun_patterns "$scan_dir"
-    print_stage_complete "Advanced detection"
+    # Exact filename IOCs (zero FP)
+    check_workflow_files "$scan_dir"           # shai-hulud-workflow.yml
+    check_bun_attack_files "$scan_dir"         # setup_bun.js, bun_environment.js
+    check_new_workflow_patterns "$scan_dir"    # formatter_*.yml, actionsSecrets.json
+    check_preinstall_bun_patterns "$scan_dir"  # "preinstall": "node setup_bun.js"
 
-    # Final checks
-    print_status "$ORANGE" "[Stage 6/6] Final checks (actions runner, second coming repos)"
-    check_github_actions_runner "$scan_dir"
-    check_second_coming_repos "$scan_dir"
-    print_stage_complete "Final checks"
+    # Exact string IOCs (zero FP)
+    check_github_actions_runner "$scan_dir"    # SHA1HULUD string
+    check_second_coming_repos "$scan_dir"      # "Sha1-Hulud: The Second Coming"
+    check_shai_hulud_repos "$scan_dir"         # shai-hulud in repo names
+    check_git_branches "$scan_dir"             # shai-hulud in branch names
 
-    # Run additional security checks only in paranoid mode
+    # Specific malicious UUID (zero FP)
+    check_content "$scan_dir"                  # webhook.site UUID bb8ca5f6-...
+
+    print_stage_complete "Deterministic detection"
+
+    # ===========================================================================
+    # PATTERN-BASED HEURISTICS (Paranoid Mode Only - May Have False Positives)
+    # These checks use regex patterns that can match legitimate code
+    # ===========================================================================
     if [[ "$paranoid_mode" == "true" ]]; then
-        print_status "$BLUE" "[Paranoid] Running extra security checks..."
+        print_status "$ORANGE" "[Stage 3/4] Pattern-based heuristics (paranoid mode)"
+        print_status "$YELLOW" "   ⚠️  These checks may produce false positives"
+
+        # Behavioral patterns (may have FP in minified/bundled code)
+        check_destructive_patterns "$scan_dir"
+        check_crypto_theft_patterns "$scan_dir"
+        check_postinstall_hooks "$scan_dir"
+        check_trufflehog_activity "$scan_dir"
+
+        # Workflow/runner patterns (may have FP with legitimate CI/CD)
+        check_discussion_workflows "$scan_dir"
+        check_github_runners "$scan_dir"
+
+        # Extended security checks
         check_typosquatting "$scan_dir"
         check_network_exfiltration "$scan_dir"
-        print_stage_complete "Paranoid mode checks"
+
+        print_stage_complete "Pattern-based heuristics"
+    else
+        print_status "$BLUE" "[Stage 3/4] Skipping pattern-based heuristics (use --paranoid to enable)"
     fi
 
     # Generate report
-    print_status "$BLUE" "Generating report..."
+    print_status "$ORANGE" "[Stage 4/4] Generating report"
     generate_report "$paranoid_mode"
     print_stage_complete "Total scan time"
 

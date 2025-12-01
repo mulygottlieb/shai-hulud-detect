@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.1.0] - 2025-12-01
 
+### Breaking Changes
+- **Default Mode Now Deterministic-Only**: Pattern-based heuristic detection moved to `--paranoid` mode only
+  - Default mode now has **zero false positives** using only exact-match detection
+  - This means TypeScript, Prettier, ESLint, and other legitimate packages will no longer be flagged
+  - Use `--paranoid` flag to enable pattern-based detection (may have false positives)
+
+### Changed
+- **Reorganized Detection Pipeline**:
+  - Stage 1: File collection
+  - Stage 2: Deterministic detection (zero FP) - hashes, package versions, exact filenames
+  - Stage 3: Pattern-based heuristics (paranoid mode only)
+  - Stage 4: Report generation
+
+- **Moved to Paranoid Mode** (pattern-based, may have FP):
+  - `check_destructive_patterns()` - was flagging TypeScript/Prettier
+  - `check_crypto_theft_patterns()` - XMLHttpRequest hijacking detection
+  - `check_postinstall_hooks()` - curl/wget in postinstall
+  - `check_trufflehog_activity()` - legitimate security tool usage
+  - `check_discussion_workflows()` - legitimate CI/CD workflows
+  - `check_github_runners()` - legitimate .dev-env directories
+
+### Kept in Default Mode (zero FP - exact matching):
+- Hash matching (SHA256)
+- Package:version matching (1700+ compromised packages)
+- Exact filenames: `setup_bun.js`, `bun_environment.js`, `actionsSecrets.json`, `shai-hulud-workflow.yml`
+- Exact strings: `SHA1HULUD`, `"Sha1-Hulud: The Second Coming"`
+- Exact patterns: `"preinstall": "node setup_bun.js"`
+- Exact matches: `shai-hulud` in repo/branch names
+- Lockfile package:version verification
+
 ### Fixed
 - **Major False Positive Reduction**: Significantly reduced false positives in destructive pattern detection for minified/bundled JavaScript files (resolves issues with TypeScript, Prettier, ESLint packages)
 
