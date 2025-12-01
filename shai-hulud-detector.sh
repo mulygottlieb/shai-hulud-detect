@@ -915,8 +915,11 @@ check_file_hashes() {
     if shasum -a 256 /dev/null &>/dev/null; then
         hash_cmd="shasum -a 256"
     fi
-    xargs -P "$PARALLELISM" $hash_cmd < "$TEMP_DIR/priority_files.txt" 2>/dev/null | \
-        awk '{print $1, $2}' > "$TEMP_DIR/file_hashes.txt"
+    # FIX: Use -0 for null-delimited input to handle filenames with spaces
+    # Also add || true to prevent pipefail from killing the script on hash errors
+    tr '\n' '\0' < "$TEMP_DIR/priority_files.txt" | \
+        xargs -0 -P "$PARALLELISM" $hash_cmd 2>/dev/null | \
+        awk '{print $1, $2}' > "$TEMP_DIR/file_hashes.txt" || true
 
     # Create malicious hash lookup pattern for grep
     printf '%s\n' "${MALICIOUS_HASHLIST[@]}" > "$TEMP_DIR/malicious_patterns.txt"
