@@ -688,37 +688,87 @@ check_destructive_patterns() {
     local scan_dir=$1
     print_status "$BLUE" "   Checking for destructive payload patterns..."
 
+    # ===========================================================================
+    # FALSE POSITIVE REDUCTION: Safe packages allowlist
+    # These are well-known, heavily-audited packages that trigger false positives
+    # due to minified/bundled code where unrelated terms appear close together.
+    # ===========================================================================
+    local SAFE_PACKAGES_REGEX="node_modules/(typescript|prettier|eslint|webpack|babel|rollup|esbuild|terser|@typescript-eslint|@babel|@rollup|@eslint|react-dom|react/|angular|vue/|next/|nuxt|svelte|vite/|parcel|@swc|@esbuild|@vercel|@types|lodash|underscore|jquery|moment|luxon|date-fns|axios|node-fetch|express|fastify|koa/|hapi|socket\.io|graphql|apollo|prisma|sequelize|mongoose|typeorm|knex|pg/|mysql|redis|mongodb|aws-sdk|@aws-sdk|firebase|@firebase|@google-cloud|azure|@azure|stripe|twilio|sendgrid)/"
+
+    # ===========================================================================
+    # FALSE POSITIVE REDUCTION: Skip large minified files
+    # Files >500KB with long average line lengths are likely bundled/minified
+    # and will produce false positives from unrelated code patterns.
+    # ===========================================================================
+    local MAX_SIZE_FOR_BEHAVIORAL=512000  # 500KB
+
     # Phase 3 Optimization: Pre-compile combined regex patterns for batch processing
     # Basic destructive patterns - ONLY flag when targeting user directories ($HOME, ~, /home/)
     # Standalone rimraf/unlinkSync/rmSync removed to reduce false positives (GitHub issue #74)
     local basic_destructive_regex="rm -rf[[:space:]]+(\\\$HOME|~[^a-zA-Z0-9_/]|/home/)|del /s /q[[:space:]]+(%USERPROFILE%|\\\$HOME)|Remove-Item -Recurse[[:space:]]+(\\\$HOME|~[^a-zA-Z0-9_/])|find[[:space:]]+(\\\$HOME|~[^a-zA-Z0-9_/]|/home/).*-exec rm|find[[:space:]]+(\\\$HOME|~[^a-zA-Z0-9_/]|/home/).*-delete|\\\$HOME/[*]|~/[*]|/home/[^/]+/[*]"
 
-    # Conditional patterns for JavaScript/Python (limited span patterns)
-    # Note: exec.{1,30}rm limits span to avoid matching minified code where "exec" and "rm" are far apart
-    local js_py_conditional_regex="if.{1,200}credential.{1,50}(fail|error).{1,50}(rm -|fs\.|rimraf|exec|spawn|child_process)|if.{1,200}token.{1,50}not.{1,20}found.{1,50}(rm -|del |fs\.|rimraf|unlinkSync|rmSync)|if.{1,200}github.{1,50}auth.{1,50}fail.{1,50}(rm -|fs\.|rimraf|exec)|catch.{1,100}(rm -rf|fs\.rm|rimraf|exec.{1,30}rm)|error.{1,100}(rm -|del |fs\.|rimraf).{1,100}(\\\$HOME|~/|home.*(directory|folder|path))"
+    # ===========================================================================
+    # FALSE POSITIVE REDUCTION: Tighter conditional patterns
+    # - Reduced span from 200 to 80 chars to avoid matching across unrelated code
+    # - Added requirement for $HOME/~/home targeting in destruction
+    # ===========================================================================
+    # Conditional patterns for JavaScript/Python (LIMITED span patterns to reduce FP)
+    local js_py_conditional_regex="if.{1,80}credential.{1,30}(fail|error).{1,30}(rm -rf|fs\.rm|fs\.unlink|rimraf).{0,50}(\\\$HOME|~/|/home/|%USERPROFILE%)|if.{1,80}token.{1,20}not.{1,20}found.{1,30}(rm -rf|fs\.rm|rimraf).{0,50}(\\\$HOME|~/|/home/)|catch.{1,60}(rm -rf|fs\.rm|rimraf).{0,40}(\\\$HOME|~/|home)"
 
-    # Shell-specific patterns (broader patterns for actual shell scripts)
-    local shell_conditional_regex="if.*credential.*(fail|error).*rm|if.*token.*not.*found.*(delete|rm)|if.*github.*auth.*fail.*rm|catch.*rm -rf|error.*delete.*home"
+    # Shell-specific patterns - require home directory targeting
+    local shell_conditional_regex="if.*credential.*(fail|error).*rm.*(HOME|home|~)|if.*token.*not.*found.*(delete|rm).*(HOME|home)|if.*github.*auth.*fail.*rm.*(HOME|home)"
 
     # Phase 3 Optimization: Create file category lists for batch processing
     cat "$TEMP_DIR/script_files.txt" "$TEMP_DIR/code_files.txt" 2>/dev/null | sort | uniq > "$TEMP_DIR/all_script_files.txt" || touch "$TEMP_DIR/all_script_files.txt"
 
-    # Separate files by type for optimized batch processing
-    grep -E '\.(js|py)$' "$TEMP_DIR/all_script_files.txt" > "$TEMP_DIR/js_py_files.txt" 2>/dev/null || touch "$TEMP_DIR/js_py_files.txt"
-    grep -E '\.(sh|bat|ps1|cmd)$' "$TEMP_DIR/all_script_files.txt" > "$TEMP_DIR/shell_files.txt" 2>/dev/null || touch "$TEMP_DIR/shell_files.txt"
+    # ===========================================================================
+    # FALSE POSITIVE REDUCTION: Filter out safe packages BEFORE scanning
+    # ===========================================================================
+    grep -vE "$SAFE_PACKAGES_REGEX" "$TEMP_DIR/all_script_files.txt" > "$TEMP_DIR/files_to_scan_destructive.txt" 2>/dev/null || touch "$TEMP_DIR/files_to_scan_destructive.txt"
+
+    # ===========================================================================
+    # FALSE POSITIVE REDUCTION: Filter out large minified files for JS/Python
+    # Large files (>500KB) with long lines are likely minified bundles
+    # ===========================================================================
+    > "$TEMP_DIR/filtered_js_py_files.txt"
+    while IFS= read -r file; do
+        if [[ -f "$file" ]]; then
+            local file_size
+            file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo "0")
+            if [[ $file_size -lt $MAX_SIZE_FOR_BEHAVIORAL ]]; then
+                echo "$file" >> "$TEMP_DIR/filtered_js_py_files.txt"
+            else
+                # For large files, check if minified (avg line length > 500)
+                local avg_line_len
+                avg_line_len=$(head -100 "$file" 2>/dev/null | awk '{total += length; count++} END {if(count>0) print int(total/count); else print 0}')
+                if [[ $avg_line_len -lt 500 ]]; then
+                    echo "$file" >> "$TEMP_DIR/filtered_js_py_files.txt"
+                fi
+            fi
+        fi
+    done < <(grep -E '\.(js|py)$' "$TEMP_DIR/files_to_scan_destructive.txt" 2>/dev/null || true)
+
+    # Separate shell files (these are rarely minified, so no size filter needed)
+    grep -E '\.(sh|bat|ps1|cmd)$' "$TEMP_DIR/files_to_scan_destructive.txt" > "$TEMP_DIR/shell_files.txt" 2>/dev/null || touch "$TEMP_DIR/shell_files.txt"
+
+    local files_to_scan_count
+    files_to_scan_count=$(wc -l < "$TEMP_DIR/files_to_scan_destructive.txt" 2>/dev/null || echo "0")
+    local original_count
+    original_count=$(wc -l < "$TEMP_DIR/all_script_files.txt" 2>/dev/null || echo "0")
+    print_status "$BLUE" "   Scanning $files_to_scan_count files (filtered from $original_count, excluding safe packages and minified bundles)"
 
     # FAST: Use xargs without -I for bulk grep (much faster)
-    # Batch 1: Basic destructive patterns (all file types)
-    if [[ -s "$TEMP_DIR/all_script_files.txt" ]]; then
-        xargs grep -liE "$basic_destructive_regex" < "$TEMP_DIR/all_script_files.txt" 2>/dev/null | \
+    # Batch 1: Basic destructive patterns (all file types, excluding safe packages)
+    if [[ -s "$TEMP_DIR/files_to_scan_destructive.txt" ]]; then
+        xargs grep -liE "$basic_destructive_regex" < "$TEMP_DIR/files_to_scan_destructive.txt" 2>/dev/null | \
             while IFS= read -r file; do
                 echo "$file:Basic destructive pattern detected" >> "$TEMP_DIR/destructive_patterns.txt"
             done || true
     fi
 
-    # Batch 2: JavaScript/Python conditional patterns
-    if [[ -s "$TEMP_DIR/js_py_files.txt" ]]; then
-        xargs grep -liE "$js_py_conditional_regex" < "$TEMP_DIR/js_py_files.txt" 2>/dev/null | \
+    # Batch 2: JavaScript/Python conditional patterns (with size/minification filter)
+    if [[ -s "$TEMP_DIR/filtered_js_py_files.txt" ]]; then
+        xargs grep -liE "$js_py_conditional_regex" < "$TEMP_DIR/filtered_js_py_files.txt" 2>/dev/null | \
             while IFS= read -r file; do
                 echo "$file:Conditional destruction pattern detected (JS/Python context)" >> "$TEMP_DIR/destructive_patterns.txt"
             done || true
@@ -1210,17 +1260,19 @@ check_crypto_theft_patterns() {
     done
 
     # Check for XMLHttpRequest hijacking (medium priority - filter out framework code)
+    # Expanded framework allowlist to reduce false positives
+    local XMLHTTP_SAFE_PATHS="node_modules/(react-native|next|nuxt|@nuxt|angular|@angular|vue|@vue|axios|superagent|got|node-fetch|whatwg-fetch|unfetch|isomorphic-fetch|cross-fetch|jquery|zepto|mithril|preact|inferno|svelte|@testing-library|jest|mocha|chai|sinon|nock|msw|@sentry|@datadog|newrelic|@elastic|logrocket|fullstory|bugsnag|rollbar|mixpanel|amplitude|segment|@segment|heap|@heap|intercom|drift|crisp|tawk|@grpc|grpc-web|protobufjs)/"
     {
         xargs grep -l "XMLHttpRequest\.prototype\.send" < "$TEMP_DIR/code_files.txt" 2>/dev/null || true
     } | while read -r file; do
         [[ -z "$file" ]] && continue
-        if [[ "$file" == *"/react-native/Libraries/Network/"* ]] || [[ "$file" == *"/next/dist/compiled/"* ]]; then
-            # Framework code - check for crypto patterns too
+        # Skip known safe framework/library paths
+        if echo "$file" | grep -qE "$XMLHTTP_SAFE_PATHS"; then
+            # Framework code - only flag if combined with crypto patterns
             if grep -qE "0x[a-fA-F0-9]{40}|checkethereumw|runmask|webhook\.site|npmjs\.help" "$file" 2>/dev/null; then
                 echo "$file:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK" >> "$TEMP_DIR/crypto_patterns.txt"
-            else
-                echo "$file:XMLHttpRequest prototype modification detected in framework code - LOW RISK" >> "$TEMP_DIR/crypto_patterns.txt"
             fi
+            # Otherwise skip - too many false positives from legitimate polyfills/interceptors
         else
             if grep -qE "0x[a-fA-F0-9]{40}|checkethereumw|runmask|webhook\.site|npmjs\.help" "$file" 2>/dev/null; then
                 echo "$file:XMLHttpRequest prototype modification with crypto patterns detected - HIGH RISK" >> "$TEMP_DIR/crypto_patterns.txt"
@@ -1507,12 +1559,20 @@ check_trufflehog_activity() {
     done
 
     # MEDIUM PRIORITY: Trufflehog references in source code (not node_modules/docs)
+    # NOTE: Exclude legitimate security tooling paths to reduce false positives
+    local TRUFFLEHOG_SAFE_PATHS="\.github/workflows/|security/|\.security|devsecops|ci/|\.ci/|scripts/security|audit|scan"
     { xargs grep -l "trufflehog\|TruffleHog" \
         < "$TEMP_DIR/trufflehog_scan_files.txt" 2>/dev/null || true; } | \
         { grep -v "/node_modules/\|\.md$\|/docs/\|\.d\.ts$" || true; } | while read -r file; do
         # Check if already flagged as HIGH
         if [[ -n "$file" ]] && ! grep -qF "$file:" "$TEMP_DIR/trufflehog_activity.txt" 2>/dev/null; then
-            echo "$file:MEDIUM:Contains trufflehog references in source code" >> "$TEMP_DIR/trufflehog_activity.txt"
+            # Skip legitimate security tooling directories
+            if echo "$file" | grep -qE "$TRUFFLEHOG_SAFE_PATHS"; then
+                # This looks like legitimate security tooling - demote to LOW
+                echo "$file:LOW:Contains trufflehog references (likely legitimate security tooling)" >> "$TEMP_DIR/trufflehog_activity.txt"
+            else
+                echo "$file:MEDIUM:Contains trufflehog references in source code" >> "$TEMP_DIR/trufflehog_activity.txt"
+            fi
         fi
     done
 
@@ -1563,9 +1623,11 @@ check_shai_hulud_repos() {
             echo "$repo_dir:Repository name contains 'Shai-Hulud'" >> "$TEMP_DIR/shai_hulud_repos.txt"
         fi
 
-        # Check for migration pattern repositories (new IoC)
-        if [[ "$repo_name" == *"-migration"* ]]; then
-            echo "$repo_dir:Repository name contains migration pattern" >> "$TEMP_DIR/shai_hulud_repos.txt"
+        # Check for Shai-Hulud migration pattern repositories (specific IoC)
+        # NOTE: Generic "-migration" removed - too many false positives with db-migration, data-migration, etc.
+        # Only flag if it looks like a Shai-Hulud migration repo (contains hulud/worm indicators)
+        if [[ "$repo_name" == *"shai"*"-migration"* ]] || [[ "$repo_name" == *"hulud"*"-migration"* ]]; then
+            echo "$repo_dir:Repository name matches Shai-Hulud migration pattern" >> "$TEMP_DIR/shai_hulud_repos.txt"
         fi
 
         # Check for GitHub remote URLs containing shai-hulud
@@ -1651,10 +1713,9 @@ check_package_integrity() {
                 fi
             done
 
-            # Check for @ctrl packages (potential worm activity)
-            if grep -q "@ctrl" "$lockfile" 2>/dev/null; then
-                echo "$org_file:Lockfile contains @ctrl packages (potential worm activity)" >> "$TEMP_DIR/integrity_issues.txt"
-            fi
+            # NOTE: Removed generic @ctrl namespace warning (GitHub issue: too many false positives)
+            # The exact package:version check above already catches compromised @ctrl packages
+            # Generic namespace warnings are now in COMPROMISED_NAMESPACES and checked in check_packages()
 
             # Cleanup temp lockfile for pnpm
             if [[ "$(basename "$org_file")" == "pnpm-lock.yaml" ]]; then

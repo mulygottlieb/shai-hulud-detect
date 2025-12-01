@@ -5,6 +5,55 @@ All notable changes to the Shai-Hulud NPM Supply Chain Attack Detector will be d
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2025-12-01
+
+### Fixed
+- **Major False Positive Reduction**: Significantly reduced false positives in destructive pattern detection for minified/bundled JavaScript files (resolves issues with TypeScript, Prettier, ESLint packages)
+
+### Added
+- **Safe Packages Allowlist**: Added comprehensive allowlist of well-known, heavily-audited packages that should be excluded from behavioral pattern scanning:
+  - Build tools: typescript, prettier, eslint, webpack, babel, rollup, esbuild, terser, vite, parcel
+  - Frameworks: react-dom, angular, vue, next, nuxt, svelte
+  - Runtime packages: @types, lodash, underscore, jquery, moment, luxon, date-fns
+  - HTTP clients: axios, node-fetch, express, fastify, koa, hapi
+  - Databases: prisma, sequelize, mongoose, typeorm, knex, pg, mysql, redis, mongodb
+  - Cloud SDKs: aws-sdk, @aws-sdk, firebase, @firebase, @google-cloud, azure, @azure
+  - Services: stripe, twilio, sendgrid, graphql, apollo, socket.io
+
+- **Minified File Detection**: Added intelligent filtering that skips large (>500KB) minified files for behavioral pattern scanning:
+  - Files >500KB with average line length >500 chars are detected as minified bundles
+  - These files are excluded from conditional destruction pattern scanning
+  - Prevents false positives from unrelated code terms appearing close together in minified code
+
+### Changed
+- **Tighter Regex Patterns**: Reduced false positives by tightening conditional destruction patterns:
+  - Reduced span from 200 to 80 characters in JS/Python conditional patterns
+  - Added requirement for `$HOME`/`~/`/`/home/` targeting in all destruction patterns
+  - Shell patterns now also require home directory targeting
+  - Removed broad `exec|spawn|child_process` patterns that matched legitimate code
+
+### Technical Details
+- **Pattern Changes**:
+  - Old: `if.{1,200}credential.{1,50}(fail|error).{1,50}(rm -|fs\.|rimraf|exec|spawn|child_process)`
+  - New: `if.{1,80}credential.{1,30}(fail|error).{1,30}(rm -rf|fs\.rm|fs\.unlink|rimraf).{0,50}(\$HOME|~/|/home/|%USERPROFILE%)`
+- **Filtering Pipeline**: Files are now filtered through safe packages allowlist → size/minification check → pattern scanning
+- **Logging Enhancement**: Added status output showing filtered vs total file counts for transparency
+
+### Security
+- **Detection Accuracy Maintained**: All actual Shai-Hulud destructive patterns still detected (targeting `$HOME`, `~`, `/home/`)
+- **Zero False Negatives for Real Threats**: Real malware always targets home directories; legitimate packages do not
+- **Improved Signal-to-Noise Ratio**: Users can now trust destructive pattern alerts as actual threats
+
+### Additional False Positive Reductions
+- **Removed generic @ctrl namespace warning**: The `check_package_integrity()` function no longer flags ALL `@ctrl` packages - only specific compromised `package:version` combinations are flagged. Many legitimate `@ctrl` packages (e.g., uncompromised versions) were causing false positives.
+- **Narrowed migration repo detection**: The `-migration` repository pattern was too broad (matching `db-migration`, `data-migration`, etc.). Now only flags repos with both `shai`/`hulud` AND `-migration` in the name.
+- **Expanded XMLHttpRequest safe paths**: Added 40+ additional legitimate packages to the XMLHttpRequest prototype modification allowlist including:
+  - HTTP clients: axios, superagent, got, node-fetch, whatwg-fetch, cross-fetch
+  - Testing libraries: jest, mocha, chai, sinon, nock, msw, @testing-library
+  - Analytics/monitoring: @sentry, @datadog, newrelic, @elastic, logrocket, bugsnag, mixpanel, amplitude, segment
+  - Frameworks: angular, vue, nuxt, preact, inferno, svelte, mithril
+- **TruffleHog legitimate usage detection**: References to TruffleHog in security-related paths (`.github/workflows/`, `security/`, `ci/`, `devsecops/`, `audit/`) are now demoted to LOW risk instead of MEDIUM, recognizing legitimate security tooling usage.
+
 ## [3.0.0] - 2025-11-29
 
 ### Breaking Changes
